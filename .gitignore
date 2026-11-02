@@ -8,9 +8,9 @@ __pycache__/
 venv/
 env/
 
-# Node (JSPyBridge / mineflayer)
+# Node
 node_modules/
-package-lock.json
+dist/
 
 # Environment / secrets
 .env
@@ -19,3 +19,7 @@ package-lock.json
 .vscode/
 .idea/
 .DS_Store
+
+# Project
+server/
+logs/
