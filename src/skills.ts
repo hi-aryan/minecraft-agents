@@ -4,8 +4,8 @@ import { goals, Move } from 'mineflayer-pathfinder'
 import { Vec3 } from 'vec3'
 import { config } from './config'
 
-// Skills are the actions a bot can do. Each one returns a short sentence about what happened.
-// In Phase 2 the LLM chooses which skill to run, and reads that sentence.
+// Skills are the actions a bot can do. Each one returns a short sentence about what happened
+// (`text`, which the LLM reads), and the chest skills also return what was in the chest (`chest`).
 
 // The resources the team can collect. A block and the item it drops can have different names
 // (stone drops cobblestone), so each resource says how to recognise both.
@@ -14,6 +14,9 @@ export const resources = {
   wood: { isBlock: (name: string) => name.endsWith('_log'), isItem: (name: string) => name.endsWith('_log') },
 }
 export type Resource = keyof typeof resources
+export type Counts = Record<Resource, number> // e.g. { wood: 12 }
+
+export type SkillResult = { text: string; chest?: Counts }
 
 // Time limits, in seconds. A bot gives up instead of getting stuck forever.
 const WALK_TIMEOUT = 60
@@ -21,14 +24,24 @@ const DIG_TIMEOUT = 15
 const PICKUP_TIMEOUT = 10
 const OPEN_CHEST_TIMEOUT = 10
 const SEARCH_DISTANCE = 64
+const MIN_CANDIDATES = 10 // how many nearby blocks gather considers, at least
+
+// Blocks each bot could not reach (e.g. too high up a tree), so gather doesn't try them again and again.
+const unreachable = new WeakMap<Bot, Set<string>>()
+function unreachableFor(bot: Bot): Set<string> {
+  if (!unreachable.has(bot)) unreachable.set(bot, new Set())
+  return unreachable.get(bot)!
+}
 
 // ---------- Skills ----------
 
 // Collects up to `amount` blocks of a resource, nearest first. Blocks it can't reach are skipped.
-export async function gather(bot: Bot, resource: Resource, amount: number): Promise<string> {
+export async function gather(bot: Bot, resource: Resource, amount: number): Promise<SkillResult> {
   try {
-    const blocks = findNearest(bot, resource, amount * 3) // extra, in case some can't be reached
-    if (blocks.length === 0) return `No ${resource} within ${SEARCH_DISTANCE} blocks.`
+    const skip = unreachableFor(bot)
+    const blocks = findNearest(bot, resource, Math.max(MIN_CANDIDATES, amount * 3) + skip.size)
+      .filter((block) => !skip.has(block.position.toString()))
+    if (blocks.length === 0) return { text: `No ${resource} within ${SEARCH_DISTANCE} blocks.` }
 
     const before = countItems(bot.inventory.items(), resource)
     let lastProblem = ''
@@ -37,28 +50,31 @@ export async function gather(bot: Bot, resource: Resource, amount: number): Prom
       try {
         await mine(bot, block)
       } catch (err) {
-        lastProblem = describeError(err) // try the next block
+        lastProblem = describeError(err)
+        const stillThere = bot.blockAt(block.position)?.name === block.name
+        if (stillThere) skip.add(block.position.toString()) // we couldn't reach it: don't try it again
       }
     }
 
     const gained = countItems(bot.inventory.items(), resource) - before
-    if (gained === 0) return `Failed: could not get any ${resource} (${lastProblem}).`
-    return `Collected ${gained} ${resource}. Carrying ${describe(bot.inventory.items())}.`
+    if (gained === 0) return { text: `Failed: could not get any ${resource} (${lastProblem}).` }
+    return { text: `Collected ${gained} ${resource}. Carrying ${describe(bot.inventory.items())}.` }
   } catch (err) {
     return failed(err)
   }
 }
 
 // Walks to the shared chest and puts every resource item in it.
-export async function depositToChest(bot: Bot): Promise<string> {
+export async function depositToChest(bot: Bot): Promise<SkillResult> {
   const items = bot.inventory.items().filter((item) => isResource(item.name))
-  if (items.length === 0) return 'Nothing to deposit.' // don't walk to the chest for nothing
+  if (items.length === 0) return { text: 'Nothing to deposit.' } // don't walk to the chest for nothing
   try {
     return await useChest(bot, async (chest) => {
       for (const item of items) {
         await chest.deposit(item.type, null, item.count)
       }
-      return `Deposited ${describe(items)}. The chest now has ${describe(chest.containerItems())}.`
+      const inChest = chest.containerItems()
+      return { text: `Deposited ${describe(items)}. The chest now has ${describe(inChest)}.`, chest: count(inChest) }
     })
   } catch (err) {
     return failed(err)
@@ -66,9 +82,12 @@ export async function depositToChest(bot: Bot): Promise<string> {
 }
 
 // Walks to the shared chest and reports what is in it.
-export async function checkChest(bot: Bot): Promise<string> {
+export async function checkChest(bot: Bot): Promise<SkillResult> {
   try {
-    return await useChest(bot, async (chest) => `The chest has ${describe(chest.containerItems())}.`)
+    return await useChest(bot, async (chest) => {
+      const inChest = chest.containerItems()
+      return { text: `The chest has ${describe(inChest)}.`, chest: count(inChest) }
+    })
   } catch (err) {
     return failed(err)
   }
@@ -86,15 +105,26 @@ function countItems(items: Item[], resource: Resource): number {
   return items.filter((item) => resources[resource].isItem(item.name)).reduce((sum, item) => sum + item.count, 0)
 }
 
-// e.g. "12 wood"
-function describe(items: Item[]): string {
-  return (Object.keys(resources) as Resource[]).map((r) => `${countItems(items, r)} ${r}`).join(', ')
+// e.g. { wood: 12 }
+export function count(items: Item[]): Counts {
+  const counts = {} as Counts
+  for (const r of Object.keys(resources) as Resource[]) counts[r] = countItems(items, r)
+  return counts
 }
 
-function findNearest(bot: Bot, resource: Resource, count: number): Block[] {
+// e.g. "12 wood"
+export function describeCounts(counts: Counts): string {
+  return Object.entries(counts).map(([r, n]) => `${n} ${r}`).join(', ')
+}
+
+function describe(items: Item[]): string {
+  return describeCounts(count(items))
+}
+
+function findNearest(bot: Bot, resource: Resource, max: number): Block[] {
   const ids = bot.registry.blocksArray.filter((b) => resources[resource].isBlock(b.name)).map((b) => b.id)
   return bot
-    .findBlocks({ matching: ids, maxDistance: SEARCH_DISTANCE, count })
+    .findBlocks({ matching: ids, maxDistance: SEARCH_DISTANCE, count: max })
     .map((pos) => bot.blockAt(pos))
     .filter((block): block is Block => block !== null)
 }
@@ -161,8 +191,8 @@ async function withTimeout<T>(task: Promise<T>, seconds: number, onGiveUp: () =>
   }
 }
 
-function failed(err: unknown): string {
-  return `Failed: ${describeError(err)}`
+function failed(err: unknown): SkillResult {
+  return { text: `Failed: ${describeError(err)}` }
 }
 
 function describeError(err: unknown): string {

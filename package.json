@@ -2,10 +2,12 @@
   "name": "id1214",
   "version": "1.0.0",
   "scripts": {
-    "start": "tsx src/main.ts",
-    "typecheck": "tsc --noEmit"
+    "start": "tsx --env-file=.env src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "log": "tsx src/tools/show-log.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.32.0",
     "mineflayer": "^4.39.0",
     "mineflayer-pathfinder": "^2.4.5",
     "vec3": "^0.2.0"
