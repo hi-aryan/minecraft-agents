@@ -23,3 +23,7 @@ dist/
 # Project
 server/
 logs/
+
+# Private notes
+PLAN.md
+CHECKLIST*.md
