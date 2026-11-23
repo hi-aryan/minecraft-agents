@@ -1,6 +1,7 @@
 import { ApiError, GoogleGenAI, ThinkingLevel } from '@google/genai'
 import { config } from './config'
 import { log } from './log'
+import { withTimeout } from './timeout'
 
 // Talks to Gemini. One function: send a prompt, get back JSON in the shape of `schema`.
 
@@ -9,14 +10,16 @@ if (!apiKey) throw new Error('GEMINI_API_KEY is missing. Put it in .env as GEMIN
 const MAX_TRIES = 5
 const CALL_TIMEOUT = 20 // seconds. A normal call takes ~1 s. Any network call can hang, so we cancel and retry.
 
-// The library has no time limit by default. It doesn't retry by default either: we retry ourselves, below.
-const gemini = new GoogleGenAI({ apiKey, httpOptions: { timeout: CALL_TIMEOUT * 1000 } })
+// The library doesn't retry by default: we retry ourselves, below. Its own time limit missed some
+// hanging calls, so we use ours (withTimeout), which always gives up on time and cancels the request.
+const gemini = new GoogleGenAI({ apiKey })
 
 export async function ask(agent: string, systemPrompt: string, message: string, schema: object): Promise<unknown> {
   for (let attempt = 1; ; attempt++) {
     const started = Date.now()
+    const cancel = new AbortController()
     try {
-      const response = await gemini.models.generateContent({
+      const request = gemini.models.generateContent({
         model: config.model,
         contents: message,
         config: {
@@ -25,8 +28,10 @@ export async function ask(agent: string, systemPrompt: string, message: string, 
           responseJsonSchema: schema, // Gemini must answer in exactly this shape
           temperature: 0.2, // low = more predictable answers
           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL }, // fast and cheap
+          abortSignal: cancel.signal,
         },
       })
+      const response = await withTimeout(request, CALL_TIMEOUT, () => cancel.abort())
       const reply = response.text ?? ''
       log(agent, 'llm', {
         tokensIn: response.usageMetadata?.promptTokenCount ?? 0,
@@ -54,7 +59,6 @@ function waitBeforeRetry(err: unknown, attempt: number): number {
 
 function shortError(err: unknown): string {
   if (isRateLimit(err)) return 'rate limit (too many requests per minute)'
-  if (err instanceof Error && err.name === 'AbortError') return `no answer within ${CALL_TIMEOUT} seconds`
   return String(err).slice(0, 200)
 }
 

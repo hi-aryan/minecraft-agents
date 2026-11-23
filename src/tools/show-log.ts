@@ -7,9 +7,18 @@ import { logDir } from '../log'
 
 const file = process.argv[2] ?? latestLog()
 
+// Per-agent numbers for the summary at the end.
+type Stats = { steps: number; failedSteps: number; takenByOthers: number; tokensIn: number; tokensOut: number }
+const stats = new Map<string, Stats>()
+function statsFor(agent: string): Stats {
+  if (!stats.has(agent)) stats.set(agent, { steps: 0, failedSteps: 0, takenByOthers: 0, tokensIn: 0, tokensOut: 0 })
+  return stats.get(agent)!
+}
+
 for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
   if (!line.trim()) continue
   const { agent, type, time, ...data } = JSON.parse(line)
+  addToStats(agent, type, data)
 
   if (type === 'system-prompt') {
     console.log(`\n===== ${agent}: SYSTEM PROMPT =====\n${data.text}`)
@@ -19,6 +28,21 @@ for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
     console.log(`>>> reply: ${data.reply ?? '(not recorded in this log)'}`)
   } else {
     console.log(`[${agent}] ${type} ${JSON.stringify(data)}`)
+  }
+}
+
+console.log('\n===== SUMMARY =====')
+console.table(Object.fromEntries(stats))
+
+function addToStats(agent: string, type: string, data: Record<string, any>) {
+  if (type === 'llm') {
+    statsFor(agent).tokensIn += data.tokensIn
+    statsFor(agent).tokensOut += data.tokensOut
+  } else if (type === 'step') {
+    statsFor(agent).steps++
+    if (/^(Failed|Invalid)/.test(data.result)) statsFor(agent).failedSteps++
+  } else if (type === 'taken-by-other') {
+    statsFor(agent).takenByOthers++
   }
 }
 

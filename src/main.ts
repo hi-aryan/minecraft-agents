@@ -2,11 +2,12 @@ import { Bot } from 'mineflayer'
 import { createBot } from './bot'
 import { runAgent } from './agent'
 import { runScripted } from './scripted'
+import { Run } from './run'
 import { config } from './config'
 import { log } from './log'
 
 // A brain decides what a bot does.
-const brains: Record<string, (bot: Bot, name: string) => Promise<void>> = {
+const brains: Record<string, (bot: Bot, name: string, run: Run) => Promise<void>> = {
   llm: runAgent, // the LLM decides every step
   scripted: runScripted, // fixed test plan, no AI, no cost
 }
@@ -21,18 +22,30 @@ if (!Number.isInteger(botCount) || botCount < 1 || botCount > maxBots || !brain)
   process.exit(1)
 }
 
-// Starts one bot and gives it the brain.
-async function startAgent(name: string) {
-  const bot = await createBot(name)
+async function main() {
+  const names = config.botNames.slice(0, botCount)
+
+  // Everyone joins first, so joining time isn't part of the run. If a bot can't join, there is no run.
+  const bots = await Promise.all(names.map(createBot)).catch((err) => {
+    console.error(`Could not start the run: ${err}`)
+    process.exit(1)
+  })
+
+  const run = new Run(names, brainName) // the clock starts here
+  await Promise.all(names.map((name, i) => startBrain(bots[i], name, run)))
+  run.end('all agents stopped') // e.g. every agent crashed; does nothing if the run already ended
+}
+
+// Runs one bot's brain. If it crashes, the others keep going.
+async function startBrain(bot: Bot, name: string, run: Run) {
   try {
-    await brain(bot, name)
+    await brain(bot, name, run)
     log(name, 'finished')
+  } catch (err) {
+    log(name, 'crashed', { message: String(err) })
   } finally {
     bot.quit() // always leave the server, also when the brain crashed
   }
 }
 
-for (const name of config.botNames.slice(0, botCount)) {
-  // If one bot crashes, the others keep going.
-  startAgent(name).catch((err) => log(name, 'crashed', { message: String(err) }))
-}
+main()
