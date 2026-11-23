@@ -14,6 +14,10 @@ export const config = {
   goal: { wood: 32 } satisfies Counts,
   timeLimitMinutes: 10,
 
+  // A human watching in-game. Agents whisper each step to this player (agents never read whispers).
+  // null = nobody to whisper to.
+  observer: 'aryanxo' as string | null,
+
   // The LLM. Pinned to an exact model so results stay comparable.
   model: 'gemini-3.5-flash-lite',
 }
